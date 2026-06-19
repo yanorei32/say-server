@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang=en>
+<head>
+	<meta charset=UTF-8>
+	<meta name=viewport content="width=device-width,initial-scale=1">
+	<title>Say Server</title>
+	<style>
+		html, body {
+			width: 100%;
+			margin: 0;
+			padding: 0;
+			border: 0;
+		}
+		.container {
+			max-width: 800px;
+			margin: auto;
+		}
+		#text {
+			width: calc(100% - 10px);
+			height: 10em;
+		}
+	</style>
+</head>
+<body>
+	<div class=container>
+		<h1>Say Server</h1>
+		<select id=character></select>
+
+		<textarea id=text placeholder="Text to Synthesis"></textarea>
+		<p>
+			<button id=synthesis_button>Synthesis</button>
+		</p>
+		<audio id=audio controls></audio>
+		<script>
+			const text = document.getElementById("text");
+			const character = document.getElementById("character");
+
+			fetch("/api/characters")
+				.then(resp => resp.json())
+				.then(characters => {
+					for (c of characters) {
+						const option = document.createElement('option');
+						option.textContent = `${c.lang} - ${c.name}`;
+						option.value = c.name;
+						character.appendChild(option);
+					}
+				});
+
+			document.getElementById("synthesis_button").addEventListener("click", async () => {
+				const request_body = JSON.stringify({
+					name: character.value,
+					text: text.value,
+				});
+
+				const response = await fetch("/api/synthesis", {
+					method: "POST",
+					headers: {
+						"Content-Type": "application/json",
+					},
+					body: request_body,
+				});
+
+				if (response.status != 200) {
+					alert(response.status + " " + response.statusText + "\n" + await response.text());
+					return;
+				}
+
+				const raw_wav = new Uint8Array(await response.arrayBuffer());
+				const audio = document.getElementById("audio");
+				audio.src = `data:audio/wav;base64,${raw_wav.toBase64()}`;
+				audio.play();
+			});
+		</script>
+	</div>
+</body>
+</html>
