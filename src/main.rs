@@ -48,7 +48,7 @@ async fn run_synthesis(name: &str, text: &str) -> Vec<u8> {
     let session = uuid::Uuid::new_v4();
 
     let mut temp_wav = TEMPORARY_DIR.get().unwrap().clone();
-    temp_wav.push(format!("{}.wav", session));
+    temp_wav.push(format!("say-server_{}.wav", session));
 
     let temp_wav = temp_wav.into_os_string();
     let temp_wav = temp_wav
@@ -56,7 +56,7 @@ async fn run_synthesis(name: &str, text: &str) -> Vec<u8> {
         .expect("The temp_wav path can be convert to string");
 
     let mut temp_txt = TEMPORARY_DIR.get().unwrap().clone();
-    temp_txt.push(format!("{}.txt", session));
+    temp_txt.push(format!("say-server_{}.txt", session));
 
     let temp_txt = temp_txt.into_os_string();
     let temp_txt = temp_txt
@@ -67,6 +67,7 @@ async fn run_synthesis(name: &str, text: &str) -> Vec<u8> {
         let f = File::create_new(&temp_txt).await.expect("Create TXT file");
         let mut f = BufWriter::new(f);
         f.write_all(text.as_bytes()).await.expect("Write TXT file");
+        f.flush().await.expect("Flush TXT file");
     }
 
     Command::new("say")
