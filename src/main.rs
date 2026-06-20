@@ -13,7 +13,7 @@ use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, BufReader},
+    io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::TcpListener,
     process::Command,
 };
@@ -45,23 +45,40 @@ struct Cli {
 
 async fn run_synthesis(name: &str, text: &str) -> Vec<u8> {
     let start_at = Instant::now();
-    let mut temp = TEMPORARY_DIR.get().unwrap().clone();
-    temp.push(format!("{}.wav", uuid::Uuid::new_v4()));
+    let session = uuid::Uuid::new_v4();
 
-    let temp = temp.into_os_string();
-    let temp = temp
+    let mut temp_wav = TEMPORARY_DIR.get().unwrap().clone();
+    temp_wav.push(format!("{}.wav", session));
+
+    let temp_wav = temp_wav.into_os_string();
+    let temp_wav = temp_wav
         .into_string()
-        .expect("The path can be convert to string");
+        .expect("The temp_wav path can be convert to string");
+
+    let mut temp_txt = TEMPORARY_DIR.get().unwrap().clone();
+    temp_txt.push(format!("{}.txt", session));
+
+    let temp_txt = temp_txt.into_os_string();
+    let temp_txt = temp_txt
+        .into_string()
+        .expect("The temp_txt path can be convert to string");
+
+    {
+        let f = File::create_new(&temp_txt).await.expect("Create TXT file");
+        let mut f = BufWriter::new(f);
+        f.write_all(text.as_bytes()).await.expect("Write TXT file");
+    }
 
     Command::new("say")
         .args([
             "-v",
             name,
             "-o",
-            &temp,
+            &temp_wav,
             "--file-format=WAVE",
             "--data-format=LEI24@22050",
-            text,
+            "-f",
+            &temp_txt,
         ])
         .spawn()
         .expect("Failed to start say command")
@@ -70,7 +87,7 @@ async fn run_synthesis(name: &str, text: &str) -> Vec<u8> {
         .expect("Failed to run say command");
 
     let buffer = {
-        let wav = File::open(&temp).await.expect("Open WAVE file");
+        let wav = File::open(&temp_wav).await.expect("Open WAVE file");
         let mut wav = BufReader::new(wav);
 
         let mut buffer = vec![];
@@ -78,9 +95,13 @@ async fn run_synthesis(name: &str, text: &str) -> Vec<u8> {
         buffer
     };
 
-    tokio::fs::remove_file(&temp)
+    tokio::fs::remove_file(&temp_wav)
         .await
         .expect("Remove WAVE file");
+
+    tokio::fs::remove_file(&temp_txt)
+        .await
+        .expect("Remove TXT file");
 
     tracing::info!("Synthesis: {:?}", Instant::now() - start_at);
 
