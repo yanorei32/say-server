@@ -77,7 +77,7 @@ async fn run_synthesis(name: &str, text: &str) -> Vec<u8> {
             "-o",
             &temp_wav,
             "--file-format=WAVE",
-            "--data-format=LEI24@22050",
+            "--data-format=LEI16@22050",
             "-f",
             &temp_txt,
         ])
