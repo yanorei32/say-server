@@ -1,6 +1,6 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use axum::{
     Router, extract,
@@ -12,26 +12,38 @@ use clap::Parser;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use tokio::{
-    fs::File,
-    io::{AsyncReadExt, AsyncWriteExt, BufReader, BufWriter},
     net::TcpListener,
-    process::Command,
+    sync::{Mutex, mpsc, oneshot},
 };
 
-static CHARACTER_LIST: OnceCell<Vec<Character>> = OnceCell::new();
-static TEMPORARY_DIR: OnceCell<PathBuf> = OnceCell::new();
+mod ffi;
+mod worker;
+
+use ffi::*;
+
+static VOICES: OnceCell<Vec<Voice>> = OnceCell::new();
+pub static TEMPORARY_DIR: OnceCell<PathBuf> = OnceCell::new();
+static WORKER_POOL: OnceCell<Mutex<HashMap<String, mpsc::Sender<RequestContext>>>> =
+    OnceCell::new();
 
 #[derive(Debug, Clone, Deserialize)]
 struct Request {
-    name: String,
+    voice_id: String,
     text: String,
 }
 
+#[derive(Debug)]
+pub struct RequestContext {
+    text: String,
+    writeback: oneshot::Sender<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, Serialize)]
-struct Character {
+struct Voice {
     name: String,
-    lang: String,
-    sample: String,
+    locale_identifier: String,
+    demo_text: String,
+    id: String,
 }
 
 #[derive(Debug, Parser)]
@@ -43,83 +55,53 @@ struct Cli {
     temp_dir: PathBuf,
 }
 
-async fn run_synthesis(name: &str, text: &str) -> Vec<u8> {
-    let start_at = Instant::now();
-    let session = uuid::Uuid::new_v4();
+async fn get_worker(voice_id: &str) -> mpsc::Sender<RequestContext> {
+    let mut pool_lock = WORKER_POOL.get().unwrap().lock().await;
 
-    let mut temp_wav = TEMPORARY_DIR.get().unwrap().clone();
-    temp_wav.push(format!("say-server_{}.wav", session));
-
-    let temp_wav = temp_wav.into_os_string();
-    let temp_wav = temp_wav
-        .into_string()
-        .expect("The temp_wav path can be convert to string");
-
-    let mut temp_txt = TEMPORARY_DIR.get().unwrap().clone();
-    temp_txt.push(format!("say-server_{}.txt", session));
-
-    let temp_txt = temp_txt.into_os_string();
-    let temp_txt = temp_txt
-        .into_string()
-        .expect("The temp_txt path can be convert to string");
-
-    {
-        let f = File::create_new(&temp_txt).await.expect("Create TXT file");
-        let mut f = BufWriter::new(f);
-        f.write_all(text.as_bytes()).await.expect("Write TXT file");
-        f.flush().await.expect("Flush TXT file");
+    if let Some(sender) = pool_lock.get(voice_id) {
+        return sender.clone();
     }
 
-    Command::new("say")
-        .args([
-            "-v",
-            name,
-            "-o",
-            &temp_wav,
-            "--file-format=WAVE",
-            "--data-format=LEI16@22050",
-            "-f",
-            &temp_txt,
-        ])
-        .spawn()
-        .expect("Failed to start say command")
-        .wait()
-        .await
-        .expect("Failed to run say command");
+    let (tx, rx) = mpsc::channel(16);
 
-    let buffer = {
-        let wav = File::open(&temp_wav).await.expect("Open WAVE file");
-        let mut wav = BufReader::new(wav);
+    std::thread::Builder::new()
+        .name(format!("worker-{voice_id}"))
+        .spawn({
+            let voice_id = voice_id.to_string();
+            move || {
+                worker::run(&voice_id, rx);
+            }
+        })
+        .unwrap();
 
-        let mut buffer = vec![];
-        wav.read_to_end(&mut buffer).await.expect("Read WAVE file");
-        buffer
-    };
+    pool_lock.insert(voice_id.to_string(), tx.clone());
 
-    tokio::fs::remove_file(&temp_wav)
-        .await
-        .expect("Remove WAVE file");
-
-    tokio::fs::remove_file(&temp_txt)
-        .await
-        .expect("Remove TXT file");
-
-    tracing::info!("Synthesis: {:?}", Instant::now() - start_at);
-
-    buffer
+    tx
 }
 
 async fn synthesis(extract::Json(request): extract::Json<Request>) -> Response {
-    if !CHARACTER_LIST
+    if !VOICES
         .get()
         .unwrap()
         .iter()
-        .any(|c| &c.name == &request.name)
+        .any(|c| c.id == request.voice_id)
     {
-        return (StatusCode::BAD_REQUEST, "INVALID CHARACTER NAME").into_response();
+        return (StatusCode::BAD_REQUEST, "INVALID VOICE ID").into_response();
     }
 
-    let output = run_synthesis(&request.name, &request.text).await;
+    let worker = get_worker(&request.voice_id).await;
+
+    let (tx, rx) = oneshot::channel();
+
+    worker
+        .send(RequestContext {
+            text: request.text,
+            writeback: tx,
+        })
+        .await
+        .unwrap();
+
+    let output = rx.await.unwrap();
 
     (
         StatusCode::OK,
@@ -129,53 +111,88 @@ async fn synthesis(extract::Json(request): extract::Json<Request>) -> Response {
         .into_response()
 }
 
-async fn characters() -> Json<Vec<Character>> {
-    Json(CHARACTER_LIST.get().unwrap().clone())
+async fn voices() -> Json<Vec<Voice>> {
+    Json(VOICES.get().unwrap().clone())
 }
 
 async fn root() -> Html<&'static str> {
     Html(include_str!("../assets/index.html"))
 }
 
-async fn init_character_list() {
-    let output = Command::new("say")
-        .args(["-v", "?"])
-        .output()
-        .await
-        .expect("Failed to run say command");
+async fn init_voices() {
+    let voices = unsafe { CopySpeechSynthesisVoicesForMode(std::ptr::null()) };
+    if voices.is_null() {
+        panic!("Failed to copy speech synthesis voices");
+    }
 
-    let output = String::from_utf8(output.stdout).expect("Failed to parse say command output");
+    let count = unsafe { CFArrayGetCount(voices) };
 
-    let characters: Vec<_> = output
-        .split('\n')
-        .flat_map(|line| {
-            if line.is_empty() {
-                return None;
-            }
+    let mut voices_ = Vec::new();
 
-            let (character, sample) = line.split_once('#').expect("Sample Text");
-            let (name, lang) = character.trim().rsplit_once(' ').expect("Character Info");
+    for i in 0..count {
+        let voice_id = unsafe { CFArrayGetValueAtIndex(voices, i) as CFStringRef };
 
-            let sample = sample.trim().to_string();
-            let name = name.trim().to_string();
-            let lang = lang.trim().to_string();
+        let mut spec = VoiceSpec {
+            creator: 0,
+            id: 0,
+            instance: 0,
+        };
 
-            Some(Character { name, sample, lang })
-        })
-        .collect();
+        if unsafe { MakeVoiceSpecForIdentifierString(voice_id, &mut spec) } != 1 {
+            continue;
+        }
 
-    CHARACTER_LIST.set(characters).unwrap();
+        let mut info: CFDictionaryRef = std::ptr::null();
+
+        unsafe { GetVoiceInfo(&spec, K_SPEECH_VOICE_ATTR_SELECTOR, &mut info) };
+
+        if info.is_null() {
+            continue;
+        }
+
+        let name =
+            unsafe { CFDictionaryGetValue(info, kSpeechVoiceName as *const _) as CFStringRef };
+
+        let locale_identifier = unsafe {
+            CFDictionaryGetValue(info, kSpeechVoiceLocaleIdentifier as *const _) as CFStringRef
+        };
+
+        let demo_text =
+            unsafe { CFDictionaryGetValue(info, kSpeechVoiceDemoText as *const _) as CFStringRef };
+
+        let name = unsafe { cfstring_to_string(name) };
+        let locale_identifier = unsafe { cfstring_to_string(locale_identifier) };
+        let id = unsafe { cfstring_to_string(voice_id) };
+        let demo_text = unsafe { cfstring_to_string(demo_text) };
+
+        voices_.push(Voice {
+            name,
+            id,
+            locale_identifier,
+            demo_text,
+        });
+
+        unsafe { CFRelease(info as *const _) };
+    }
+
+    unsafe { CFRelease(voices as *const _) };
+
+    VOICES.set(voices_).unwrap();
 }
 
 #[tokio::main]
 async fn main() {
-    init_character_list().await;
+    init_voices().await;
 
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_thread_names(true)
+        .with_target(false)
+        .init();
 
     let cli = Cli::parse();
 
     TEMPORARY_DIR.set(cli.temp_dir).unwrap();
+    WORKER_POOL.set(Mutex::new(HashMap::new())).unwrap();
 
     let listener = TcpListener::bind(&cli.listen)
         .await
@@ -183,7 +200,7 @@ async fn main() {
 
     let app = Router::new()
         .route("/", get(root))
-        .route("/api/characters", get(characters))
+        .route("/api/voices", get(voices))
         .route("/api/synthesis", post(synthesis));
 
     tracing::info!("Listening on {}", &cli.listen);

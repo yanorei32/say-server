@@ -24,7 +24,7 @@
 <body>
 	<div class=container>
 		<h1>Say Server</h1>
-		<select id=character></select>
+		<select id=voice></select>
 
 		<textarea id=text placeholder="Text to Synthesis"></textarea>
 		<p>
@@ -33,22 +33,22 @@
 		<audio id=audio controls></audio>
 		<script>
 			const text = document.getElementById("text");
-			const character = document.getElementById("character");
+			const voice = document.getElementById("voice");
 
-			fetch("/api/characters")
+			fetch("/api/voices")
 				.then(resp => resp.json())
-				.then(characters => {
-					for (c of characters) {
+				.then(voices => {
+					for (v of voices) {
 						const option = document.createElement('option');
-						option.textContent = `${c.lang} - ${c.name}`;
-						option.value = c.name;
-						character.appendChild(option);
+						option.textContent = `${v.locale_identifier} - ${v.name}`;
+						option.value = v.id;
+						voice.appendChild(option);
 					}
 				});
 
 			document.getElementById("synthesis_button").addEventListener("click", async () => {
 				const request_body = JSON.stringify({
-					name: character.value,
+					voice_id: voice.value,
 					text: text.value,
 				});
 
