@@ -1,4 +1,4 @@
-use std::ffi::CStr;
+use std::ffi::CString;
 use std::os::raw::c_void;
 use std::time::Instant;
 
@@ -24,7 +24,7 @@ unsafe fn channel_open(voice_name: &str) -> *mut c_void {
         instance: 0,
     };
 
-    let cf_voice = unsafe { cfstring_from_str(voice_name) };
+    let cf_voice = unsafe { cfstring_from_str(&CString::new(voice_name).unwrap()) };
     let v_err = unsafe { MakeVoiceSpecForIdentifierString(cf_voice, &mut voice) };
     unsafe { CFRelease(cf_voice as *const _) };
 
@@ -81,15 +81,11 @@ unsafe fn synthesize(speech_channel: *mut c_void, text: &str) -> Vec<u8> {
     let mut temp_wav = crate::TEMPORARY_DIR.get().unwrap().clone();
     temp_wav.push(format!("say-server_{}.wav", session));
 
-    let mut path_buf = temp_wav.to_str().unwrap().as_bytes().to_vec();
+    let path_str = temp_wav.to_str().unwrap();
 
-    path_buf.push(0);
+    let path_cstr = CString::new(path_str).unwrap();
 
-    let path_cstr = unsafe { CStr::from_ptr(path_buf.as_ptr() as *const i8) };
-    let path_str = path_cstr.to_str().unwrap();
-    tracing::debug!("tmpfile {}", path_str);
-
-    let path_cf = unsafe { cfstring_from_str(path_str) };
+    let path_cf = unsafe { cfstring_from_str(&path_cstr) };
     let file_url = unsafe {
         CFURLCreateWithFileSystemPath(std::ptr::null(), path_cf, K_CF_URL_POSIX_PATH_STYLE, 0)
     };
@@ -144,7 +140,7 @@ unsafe fn synthesize(speech_channel: *mut c_void, text: &str) -> Vec<u8> {
         panic!("SetSpeechProperty (extfile): {}", err);
     }
 
-    let cf_text = unsafe { cfstring_from_str(text) };
+    let cf_text = unsafe { cfstring_from_str(&CString::new(text).unwrap()) };
 
     let (tx, mut rx): (_, tokio::sync::mpsc::Receiver<()>) = tokio::sync::mpsc::channel(1);
 

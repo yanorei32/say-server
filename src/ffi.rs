@@ -1,4 +1,4 @@
-use std::ffi::c_void;
+use std::ffi::{c_void, CStr};
 use std::os::raw::c_char;
 
 pub type CFTypeRef = *const c_void;
@@ -114,7 +114,7 @@ unsafe extern "C" {
     pub fn CFRelease(cf: *const c_void);
 }
 
-pub unsafe fn cfstring_from_str(s: &str) -> CFStringRef {
+pub unsafe fn cfstring_from_str(s: &CStr) -> CFStringRef {
     unsafe {
         CFStringCreateWithCString(
             std::ptr::null(),
